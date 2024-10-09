@@ -1,1 +1,3 @@
-# Currently broken when attempting to inject multiple DLLs
+# DLL Injector by IsopodOSZM
+
+Simply compile the source code, run the executable and follow the instructions
