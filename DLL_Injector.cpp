@@ -66,7 +66,7 @@ int main(int argc, char *argv[]){
                     break;
             }
         }
-        std:getline(std::cin, input)
+        std:getline(std::cin, input);
 
 
     }while(input!="quit" || input!="q");
