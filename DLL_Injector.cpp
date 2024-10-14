@@ -18,19 +18,14 @@ std::vector<fs::path> Get_DLLs();
 
 int main(int argc, char *argv[]){
     info("Please place DLLs in current directory with executable or in specified directory labelled \"DLLs\" which will be created if one doesnt exist already");
-    Get_DLLs();
-    HMODULE hKernel{GetModuleHandleW(L"Kernel32")}; // Get module handle for Kernel32.dll
+    Get_DLLs(); // Create folder for DLLs
+    HANDLE hProcess{}; // Handle to target process
 
-    if(hKernel == NULL){                // Check if acquired handle for Kernel32.dll
-        error("Failed to acquire Kernel32.dll handle");
-        return 1;
-    }
-    
     if(argc>1){                         // Get Process Handle
-        GetProcHandle(atoi(argv[1]));
+        hProcess = GetProcHandle(atoi(argv[1]));
     }
     else{
-        GetProcHandle();
+        hProcess = GetProcHandle();
     } 
     std::vector<fs::path> filepaths{Get_DLLs()}; // filepaths to DLLs
     size_t filepaths_size{filepaths.size()}; // number of elements in filepaths
@@ -72,14 +67,63 @@ int main(int argc, char *argv[]){
     }while(input!="quit" || input!="q");
     
 
-    // VirtualAllocEx();
-    // WriteProcessMemory();
-    // CreateRemoteThread();
-
 
     return 0;
 }
 
+
+HANDLE Inject_DLL(const HANDLE hProcess, fs::path DLL_Path, LPDWORD* ThreadID){
+    std::string filename{DLL_Path.filename().string()};
+
+    HMODULE hKernel{GetModuleHandleW(L"Kernel32")}; // Get module handle for Kernel32.dll
+
+    if(hKernel == NULL){                            // Check if acquired handle for Kernel32.dll
+        error("Inject_DLL: Failed to acquire Kernel32.dll handle for %s. \n Error code: 0x%lX", filename, GetLastError());
+        return;
+    }
+    LPTHREAD_START_ROUTINE LoadLib{(LPTHREAD_START_ROUTINE) GetProcAddress(hKernel, "LoadLibraryW")}; // Thread routine
+
+    wchar_t Wide_DLL_Path[MAX_PATH]{}; // Wide string path to the DLL
+    wcscpy(Wide_DLL_Path, str_to_wchar_t(DLL_Path.string())); // Copy string path into wchar array
+                                                                
+    size_t Wide_DLL_Path_Size{sizeof(Wide_DLL_Path)}; // Size of the Path (since the max is 260 chars, thats how big itll be)
+    
+    LPVOID rBuffer{};
+
+    rBuffer = VirtualAllocEx(hProcess, NULL, Wide_DLL_Path_Size, (MEM_COMMIT | MEM_RESERVE), PAGE_READWRITE);
+
+    if(rBuffer == NULL){
+        error("Inject_DLL: Failed to allocate memory in target process for %s. \n Error code: 0x%lX", filename, GetLastError());
+        CloseHandle(hKernel);
+        return;
+    }
+    
+    size_t* Bytes_Written{ new size_t };
+
+    WriteProcessMemory(hProcess, rBuffer, Wide_DLL_Path, Wide_DLL_Path_Size, Bytes_Written);
+
+    if(*Bytes_Written == 0){
+        error("Inject_DLL: Failed to write memory in target process for %s. \n Error code: 0x%lX", filename, GetLastError());
+        CloseHandle(hKernel);
+        return;
+    }
+
+    HANDLE hThread{CreateRemoteThread(hProcess, NULL, 0, LoadLib, rBuffer, 0, *ThreadID)};
+
+    if(hThread == NULL){
+        error("Inject_DLL: Failed to create remote thread in target process for %s. \n Error code: 0x%lX", filename, GetLastError());
+        CloseHandle(hKernel);
+        return;
+    }
+
+    return hThread;
+}
+
+wchar_t * str_to_wchar_t(std::string src){
+    std::wstring Src_Buffer{};
+    Src_Buffer.assign(src.begin(), src.end());
+    return Src_Buffer.data();
+}
 
 HANDLE ValidateProcHandle(DWORD PID){
     HANDLE hProcess{0};
