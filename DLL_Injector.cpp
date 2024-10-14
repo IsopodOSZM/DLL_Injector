@@ -15,6 +15,9 @@ enum states {off, once, leave};
 
 HANDLE GetProcHandle(DWORD PID = NULL); 
 std::vector<fs::path> Get_DLLs();
+HANDLE Inject_DLL(const HANDLE hProcess, const fs::path DLL_Path, LPDWORD* ThreadID, LPVOID* rBuffer);
+HANDLE ValidateProcHandle(DWORD PID);
+wchar_t * str_to_wchar_t(std::string src);
 
 int main(int argc, char *argv[]){
     info("Please place DLLs in current directory with executable or in specified directory labelled \"DLLs\" which will be created if one doesnt exist already");
@@ -43,7 +46,6 @@ int main(int argc, char *argv[]){
 
     std::string input{};
     printf("\n\n\n");
-    std::cin.ignore();
     do{
         info("Controls: [q/quit/exit - quit program; r/run - inject DLL(s); rescan - rescan directory for DLLs]");
         info("Found the following DLL files. Please input number to cycle through off/activates once/left on: ");
@@ -62,58 +64,146 @@ int main(int argc, char *argv[]){
             }
         }
         std:getline(std::cin, input);
+        try{
+            if(stoi(input) <= filepaths_size){
+                int choice = stoi(input)-1;
+                switch (state[choice]){
+                case off:
+                    state[choice] = once;
+                    break;
+                case once:
+                    state[choice] = leave;
+                    break;
+                case leave:
+                    state[choice] = off;
+                    break;
+                }
+            }
+        }
+        catch(std::invalid_argument){
+            info("abcdefghijklmnopqrstuvwxyz");
+            if(input == "r" || input == "run"){
+                break;
+            }
+            else if(input == "q" || input == "quit" || input == "exit"){
+                return 0;
+            }
+            else if(input == "rescan"){
+                filepaths = Get_DLLs();
+                filepaths_size = filepaths.size();
+                
+                filenames.clear();
+                for(const auto &x : filepaths){
+                    filenames.push_back(x.filename().string());
+                }
 
+                state.clear();
+                for(size_t x{}; x<filepaths_size; x++){
+                    state.push_back(off);
+                }
+            }
+            else{
+                warn("Incorrect input given, please provide a correct input. if you have given a correct input, please open a new issue.");
+                info("Controls: [q/quit/exit - quit program; r/run - inject DLL(s); rescan - rescan directory for DLLs]");
+            }
 
-    }while(input!="quit" || input!="q");
+        }
+        catch(std::out_of_range){
+            error("stoi has thrown an std::out_of_range exception! Exiting...");
+            return 1;
+        }
+    }while(true);
+
+    std::vector<LPDWORD> Thread_IDs{};
+    std::vector<LPVOID> Memory_Pages{};
+    std::vector<HANDLE> Thread_Handles{};
+
+    for(size_t x{}; x<filepaths_size; x++){
+        if(state[x] == off){
+            continue;
+        }
+        LPDWORD* Thread_ID{};
+        LPVOID* Memory_Page{};
+        HANDLE Thread_Handle{};
+
+        Thread_Handle = Inject_DLL(hProcess, filepaths[x], Thread_ID, Memory_Page);
+
+        if(Thread_Handle == NULL){
+            continue;
+        }
+        
+        Thread_IDs.push_back(*Thread_ID);
+        Memory_Pages.push_back(*Memory_Page);
+        Thread_Handles.push_back(Thread_Handle);
+    }
+    WaitForMultipleObjects(Thread_Handles.size(), Thread_Handles.data(), true, INFINITE);
+
+    size_t PLACEHOLDER_NAME{};
+    for(size_t x{}; x<filepaths_size; x++){
+        switch(state[x]){
+            case off:
+                continue;
+                break;
+            case once:
+                CloseHandle(Thread_Handles[PLACEHOLDER_NAME]);
+                VirtualFreeEx(hProcess, Memory_Pages[PLACEHOLDER_NAME], sizeof(*str_to_wchar_t(filepaths[x].string())), MEM_RELEASE);
+                PLACEHOLDER_NAME++;
+                break;
+            case leave:
+                PLACEHOLDER_NAME++;
+                break;
+                
+        }
+
+    }
     
 
-
+    CloseHandle(hProcess);
     return 0;
 }
 
 
-HANDLE Inject_DLL(const HANDLE hProcess, fs::path DLL_Path, LPDWORD* ThreadID){
+HANDLE Inject_DLL(const HANDLE hProcess, const fs::path DLL_Path, LPDWORD* ThreadID, LPVOID* rBuffer){
     std::string filename{DLL_Path.filename().string()};
 
     HMODULE hKernel{GetModuleHandleW(L"Kernel32")}; // Get module handle for Kernel32.dll
 
     if(hKernel == NULL){                            // Check if acquired handle for Kernel32.dll
         error("Inject_DLL: Failed to acquire Kernel32.dll handle for %s. \n Error code: 0x%lX", filename, GetLastError());
-        return;
+        return NULL;
     }
     LPTHREAD_START_ROUTINE LoadLib{(LPTHREAD_START_ROUTINE) GetProcAddress(hKernel, "LoadLibraryW")}; // Thread routine
 
-    wchar_t Wide_DLL_Path[MAX_PATH]{}; // Wide string path to the DLL
-    wcscpy(Wide_DLL_Path, str_to_wchar_t(DLL_Path.string())); // Copy string path into wchar array
+    std::array<wchar_t,MAX_PATH> Wide_DLL_Path{}; // Wide string path to the DLL
                                                                 
-    size_t Wide_DLL_Path_Size{sizeof(Wide_DLL_Path)}; // Size of the Path (since the max is 260 chars, thats how big itll be)
-    
-    LPVOID rBuffer{};
+    size_t Wide_DLL_Path_Size{Wide_DLL_Path.size()}; // Size of the Path (since the max is 260 chars, thats how big itll be)
+    // info("%lX", hProcess);
+    // info("%lX", hProcess);
+    // info("%lX", hProcess);
+    *rBuffer = VirtualAllocEx(hProcess, NULL, Wide_DLL_Path_Size, (MEM_COMMIT | MEM_RESERVE), PAGE_READWRITE);
 
-    rBuffer = VirtualAllocEx(hProcess, NULL, Wide_DLL_Path_Size, (MEM_COMMIT | MEM_RESERVE), PAGE_READWRITE);
 
-    if(rBuffer == NULL){
+    if(*rBuffer == NULL){
         error("Inject_DLL: Failed to allocate memory in target process for %s. \n Error code: 0x%lX", filename, GetLastError());
         CloseHandle(hKernel);
-        return;
+        return NULL;
     }
     
     size_t* Bytes_Written{ new size_t };
-
-    WriteProcessMemory(hProcess, rBuffer, Wide_DLL_Path, Wide_DLL_Path_Size, Bytes_Written);
+    WriteProcessMemory(hProcess, *rBuffer, Wide_DLL_Path, Wide_DLL_Path_Size, Bytes_Written);
 
     if(*Bytes_Written == 0){
         error("Inject_DLL: Failed to write memory in target process for %s. \n Error code: 0x%lX", filename, GetLastError());
         CloseHandle(hKernel);
-        return;
+        return NULL;
     }
 
-    HANDLE hThread{CreateRemoteThread(hProcess, NULL, 0, LoadLib, rBuffer, 0, *ThreadID)};
+    HANDLE hThread{CreateRemoteThread(hProcess, NULL, 0, LoadLib, *rBuffer, 0, *ThreadID)};
 
     if(hThread == NULL){
         error("Inject_DLL: Failed to create remote thread in target process for %s. \n Error code: 0x%lX", filename, GetLastError());
         CloseHandle(hKernel);
-        return;
+        return NULL;
     }
 
     return hThread;
