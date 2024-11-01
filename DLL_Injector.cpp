@@ -4,6 +4,8 @@
 #include <filesystem>
 #include <vector>
 #include <math.h>
+#include <map>
+
 
 #define okay(msg, ...) printf("[+] " msg " \n",##__VA_ARGS__)
 #define info(msg, ...) printf("[*] " msg " \n",##__VA_ARGS__)
@@ -15,9 +17,10 @@ enum states {off, once, leave};
 
 HANDLE GetProcHandle(DWORD PID = NULL); 
 std::vector<fs::path> Get_DLLs();
-HANDLE Inject_DLL(const HANDLE hProcess, const fs::path DLL_Path, LPDWORD* ThreadID, LPVOID* rBuffer);
+HANDLE Inject_DLL(const HANDLE hProcess, const fs::path DLL_Path, LPVOID* rBuffer);
 HANDLE ValidateProcHandle(DWORD PID);
 wchar_t * str_to_wchar_t(std::string src);
+bool Free_DLL(const HANDLE hProcess, LPVOID rBuffer, HMODULE hModule, fs::path filename);
 
 int main(int argc, char *argv[]){
     info("Please place DLLs in current directory with executable or in specified directory labelled \"DLLs\" which will be created if one doesnt exist already");
@@ -109,33 +112,57 @@ int main(int argc, char *argv[]){
         }
         catch(std::out_of_range){
             error("stoi has thrown an std::out_of_range exception! Exiting...");
+            return 1;
         }
     }while(true);
 
-    std::vector<LPDWORD> Thread_IDs{};
-    std::vector<LPVOID> Memory_Pages{};
-    std::vector<HANDLE> Thread_Handles{}; //tyest
+    std::map<size_t, std::pair<fs::path, states>> Active_Filepaths{};
 
     for(size_t x{}; x<filepaths_size; x++){
         if(state[x] == off){
             continue;
         }
-        LPDWORD *Thread_ID{ new LPDWORD };
+
+        Active_Filepaths.insert( {Active_Filepaths.size(), {filepaths[x], state[x]} } );
+    }
+
+    std::vector<LPVOID> Memory_Pages{};
+    std::vector<HANDLE> Thread_Handles{};
+
+
+    for(const auto x : Active_Filepaths){
         LPVOID *Memory_Page{ new LPVOID };
         HANDLE Thread_Handle{};
 
-        Thread_Handle = Inject_DLL(hProcess, filepaths[x], Thread_ID, Memory_Page);
-
+        Thread_Handle = Inject_DLL(hProcess, x.second.first, Memory_Page);
+        info("0x%lX", Thread_Handle);
         if(Thread_Handle == NULL){
             continue;
         }
         
-        Thread_IDs.push_back(*Thread_ID);
         Memory_Pages.push_back(*Memory_Page);
         Thread_Handles.push_back(Thread_Handle);
-        delete Thread_ID;
         delete Memory_Page;
     }
+
+    std::vector<HANDLE> To_DeAllocate{};
+
+    size_t PLACEHOLDER_NAME{};
+    for(const auto x : Active_Filepaths){
+        switch(x.second.second){
+            case once:
+                To_DeAllocate.push_back(Thread_Handles[PLACEHOLDER_NAME]);
+                PLACEHOLDER_NAME++;
+                break;
+            case leave:
+                PLACEHOLDER_NAME++;
+                break;
+                
+        }
+
+    }
+    WaitForMultipleObjects(To_DeAllocate.size(), To_DeAllocate.data(), true, INFINITE);
+    
     std::cout << "Memory Pages: ";
     for(const auto x : Memory_Pages){
         std::cout << x << ", ";
@@ -146,40 +173,33 @@ int main(int argc, char *argv[]){
         std::cout << x << ", ";
     }
     std::cout << "\n";
-    std::cout << "Thread IDs: ";
-    for(const auto x : Thread_IDs){
-        std::cout << x << ", ";
-    }
-    std::cout << "\n";
-
-    WaitForMultipleObjects(Thread_Handles.size(), Thread_Handles.data(), true, INFINITE);
 
     info("Threads have completed execution!");
-    size_t PLACEHOLDER_NAME{};
-    for(size_t x{}; x<filepaths_size; x++){
-        switch(state[x]){
-            case off:
-                continue;
-                break;
-            case once:
-                
-                PLACEHOLDER_NAME++;
-                break;
-            case leave:
-                PLACEHOLDER_NAME++;
-                break;
-                
+    for(auto x : Active_Filepaths){
+        if(x.second.second != once){
+            continue;
         }
-
+        std::cout << Memory_Pages[x.first] << "\n";
+        HMODULE *ExitCode{ new HMODULE};
+        GetExitCodeThread(Thread_Handles[x.first], (LPDWORD)ExitCode);
+        info("Module Handle: %llX", *ExitCode);
+        Free_DLL(hProcess, Memory_Pages[x.first], *ExitCode, x.second.first.filename());
+        CloseHandle(Thread_Handles[x.first]);
+        Thread_Handles.erase(Thread_Handles.begin()+x.first);
+        Memory_Pages.erase(Memory_Pages.begin()+x.first);
+        delete ExitCode;
     }
-    
+
 
     CloseHandle(hProcess);
     return 0;
 }
 
 
-HANDLE Inject_DLL(const HANDLE hProcess, const fs::path DLL_Path, LPDWORD* ThreadID, LPVOID* rBuffer){
+/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+HANDLE Inject_DLL(const HANDLE hProcess, const fs::path DLL_Path, LPVOID* rBuffer){
     std::string filename{DLL_Path.filename().string()};
     
     info("Now attempting injection of %s into the target process", filename.data());    
@@ -217,7 +237,7 @@ HANDLE Inject_DLL(const HANDLE hProcess, const fs::path DLL_Path, LPDWORD* Threa
     }
 
     info("Successfully written to memory in target process!");    
-    HANDLE hThread{CreateRemoteThread(hProcess, NULL, 0, LoadLib, *rBuffer, 0, *ThreadID)};
+    HANDLE hThread{CreateRemoteThread(hProcess, NULL, 0, LoadLib, *rBuffer, 0, NULL)};
 
     if(hThread == NULL){
         error("Inject_DLL: Failed to create remote thread in target process for %s. \n Error code: 0x%lX", filename, GetLastError());
@@ -226,37 +246,81 @@ HANDLE Inject_DLL(const HANDLE hProcess, const fs::path DLL_Path, LPDWORD* Threa
         return NULL;
     }
     info("Successfully created remote thread in target process! \n");    
+    CloseHandle(hKernel);
     delete Bytes_Written;
 
     return hThread;
 }
 
-void Free_DLL(const HANDLE hProcess, LPVOID rBuffer){
+/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+bool Free_DLL(const HANDLE hProcess, LPVOID rBuffer, HMODULE hModule, fs::path filepath){
+    std::string filename{filepath.filename().string()};
+
+    info("Starting Deallocation of %s", filename.data());
     HMODULE hKernel{GetModuleHandleW(L"Kernel32")}; // Get module handle for Kernel32.dll
 
     if(hKernel == NULL){ // Check if acquired handle for Kernel32.dll
         error("Inject_DLL: Failed to acquire Kernel32.dll handle for . \n Error code: 0x%lX", GetLastError());
-        return;
+        CloseHandle(hKernel);
+        return false;
     }
-    LPTHREAD_START_ROUTINE FreeLib{(LPTHREAD_START_ROUTINE) GetProcAddress(hKernel, "FreeLibrary")}; // Thread routine
-    LPDWORD ThreadID{};
 
-    HANDLE hThread{CreateRemoteThread(hProcess, NULL, 0, FreeLib, rBuffer, 0, ThreadID)};
+    LPDWORD ExitCode{ new DWORD };
+    size_t Bytes{};
+
+    if(WriteProcessMemory(hProcess, rBuffer, &hModule, sizeof(DWORD), &Bytes) == 0){
+        error("cant write handle :( Error: %lX", GetLastError());
+    }
+    info("Bytes written: %lld", Bytes);
+
+    LPTHREAD_START_ROUTINE FreeLib{(LPTHREAD_START_ROUTINE) GetProcAddress(hKernel, "FreeLibrary")}; // Thread routine
+    HANDLE hThread{CreateRemoteThread(hProcess, NULL, 0, FreeLib, rBuffer, 0, NULL)};
 
     WaitForSingleObject(hThread, INFINITE);
+
+    GetExitCodeThread(hThread, ExitCode);
+
+    if(*ExitCode == 0){
+        warn("Could not free library %s. Error code: %lX", filename.data(), GetLastError());
+        delete ExitCode;
+        CloseHandle(hKernel);
+        CloseHandle(hThread);
+        return false;
+    }
+
+
+    info("%s has been freed successfully!", filename.data());
+
+    CloseHandle(hKernel);
+    CloseHandle(hThread);
     
-    
-    // CloseHandle();
-    
-    // VirtualFreeEx(hProcess, rBuffer, , MEM_RELEASE);
+    // if(VirtualFreeEx(hProcess, rBuffer, 0, MEM_RELEASE) == 0){
+    //     warn("Could not deallocate memory for address space 0x%lX. Error code: 0x%lX", rBuffer, GetLastError());
+    //     delete ExitCode;
+    //     CloseHandle(hKernel);
+    //     CloseHandle(hThread);
+    //     return false;
+    // }
+    delete ExitCode;
+    info("Deallocated %s's memory page successfully!\n", filename.data());
+
+    return true;
     
 }
+
+/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 wchar_t * str_to_wchar_t(std::string src){
     std::wstring Src_Buffer{};
     Src_Buffer.assign(src.begin(), src.end());
     return Src_Buffer.data();
 }
+
+/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 HANDLE ValidateProcHandle(DWORD PID){
     HANDLE hProcess{0};
@@ -274,6 +338,9 @@ HANDLE ValidateProcHandle(DWORD PID){
     return hProcess;
 }
 
+/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
 HANDLE GetProcHandle(DWORD PID){ 
     HANDLE hProcess{0};
     if(PID != NULL){
@@ -284,9 +351,12 @@ HANDLE GetProcHandle(DWORD PID){
         std::cin >> PID;
         hProcess = ValidateProcHandle(PID);
     };
-    okay("Acquired process handle! %lu", hProcess);
+    okay("Acquired process handle! 0x%lX", hProcess);
     return hProcess;
 }
+
+/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 std::vector<fs::path> Get_DLLs(){
     std::vector<fs::path> files{};
