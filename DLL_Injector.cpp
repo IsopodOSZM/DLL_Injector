@@ -36,7 +36,7 @@ int main(int argc, char *argv[]){
     std::vector<fs::path> filepaths{Get_DLLs()}; // filepaths to DLLs
     size_t filepaths_size{filepaths.size()}; // number of elements in filepaths
     
-    std::vector<std::string> filenames{};
+    std::vector<std::string> filenames{}; // filenames of the DLLs
     for(const auto &x : filepaths){
         filenames.push_back(x.filename().string());
     }
@@ -147,15 +147,15 @@ int main(int argc, char *argv[]){
 
     std::vector<HANDLE> To_DeAllocate{};
 
-    size_t PLACEHOLDER_NAME{};
+    size_t Deallocation_index{};
     for(const auto x : Active_Filepaths){
         switch(x.second.second){
             case once:
-                To_DeAllocate.push_back(Thread_Handles[PLACEHOLDER_NAME]);
-                PLACEHOLDER_NAME++;
+                To_DeAllocate.push_back(Thread_Handles[Deallocation_index]);
+                Deallocation_index++;
                 break;
             case leave:
-                PLACEHOLDER_NAME++;
+                Deallocation_index++;
                 break;
                 
         }
@@ -255,7 +255,7 @@ HANDLE Inject_DLL(const HANDLE hProcess, const fs::path DLL_Path, LPVOID* rBuffe
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
-bool Free_DLL(const HANDLE hProcess, LPVOID rBuffer, HMODULE hModule, fs::path filepath){
+bool Free_DLL(const HANDLE hProcess, LPVOID MemPage, HMODULE hModule, fs::path filepath){
     std::string filename{filepath.filename().string()};
 
     info("Starting Deallocation of %s", filename.data());
@@ -270,20 +270,33 @@ bool Free_DLL(const HANDLE hProcess, LPVOID rBuffer, HMODULE hModule, fs::path f
     LPDWORD ExitCode{ new DWORD };
     size_t Bytes{};
 
-    if(WriteProcessMemory(hProcess, rBuffer, &hModule, sizeof(DWORD), &Bytes) == 0){
+    if(WriteProcessMemory(hProcess, MemPage, &hModule, sizeof(hModule), &Bytes) == 0){
         error("cant write handle :( Error: %lX", GetLastError());
     }
     info("Bytes written: %lld", Bytes);
 
     LPTHREAD_START_ROUTINE FreeLib{(LPTHREAD_START_ROUTINE) GetProcAddress(hKernel, "FreeLibrary")}; // Thread routine
-    HANDLE hThread{CreateRemoteThread(hProcess, NULL, 0, FreeLib, rBuffer, 0, NULL)};
+    if(FreeLib == NULL){
+        warn("FreeLibrary could not be found! Error Code: 0x%lX", GetLastError()); 
+        CloseHandle(hKernel);
+        return false;
+    }
+    info("MemPage: %llX", MemPage);
+
+    // LPVOID Test{new LPVOID};
+    // if(ReadProcessMemory(hProcess, MemPage, Test,sizeof(hModule), NULL) == 0) warn("Bad: 0x%llX", GetLastError);
+    // info("Process memory: %llX", *(HMODULE *)Test);
+
+    HMODULE* Argument{ new HMODULE };
+    Argument = (HMODULE *)MemPage;
+
+    HANDLE hThread{CreateRemoteThread(hProcess, NULL, 0, FreeLib, Argument, 0, NULL)};
 
     WaitForSingleObject(hThread, INFINITE);
-
     GetExitCodeThread(hThread, ExitCode);
 
     if(*ExitCode == 0){
-        warn("Could not free library %s. Error code: %lX", filename.data(), GetLastError());
+        warn("Could not free library %s. Error code: 0x%lX", filename.data(), GetLastError());
         delete ExitCode;
         CloseHandle(hKernel);
         CloseHandle(hThread);
